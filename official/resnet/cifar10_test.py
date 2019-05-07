@@ -37,14 +37,22 @@ class BaseTest(tf.test.TestCase):
   """Tests for the Cifar10 version of Resnet.
   """
 
+  _num_validation_images = None
+
   @classmethod
   def setUpClass(cls):  # pylint: disable=invalid-name
     super(BaseTest, cls).setUpClass()
     cifar10_main.define_cifar_flags()
 
+  def setUp(self):
+    super(BaseTest, self).setUp()
+    self._num_validation_images = cifar10_main.NUM_IMAGES['validation']
+    cifar10_main.NUM_IMAGES['validation'] = 4
+
   def tearDown(self):
     super(BaseTest, self).tearDown()
     tf.io.gfile.rmtree(self.get_temp_dir())
+    cifar10_main.NUM_IMAGES['validation'] = self._num_validation_images
 
   def test_dataset_input_fn(self):
     fake_data = bytearray()
@@ -157,13 +165,13 @@ class BaseTest(tf.test.TestCase):
   def test_cifar10_end_to_end_synthetic_v1(self):
     integration.run_synthetic(
         main=cifar10_main.run_cifar, tmp_root=self.get_temp_dir(),
-        extra_flags=['-resnet_version', '1']
+        extra_flags=['-resnet_version', '1', '-batch_size', '4']
     )
 
   def test_cifar10_end_to_end_synthetic_v2(self):
     integration.run_synthetic(
         main=cifar10_main.run_cifar, tmp_root=self.get_temp_dir(),
-        extra_flags=['-resnet_version', '2']
+        extra_flags=['-resnet_version', '2', '-batch_size', '4']
     )
 
 
