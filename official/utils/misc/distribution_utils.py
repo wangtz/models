@@ -18,27 +18,90 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
+import os
 import random
 import string
 import tensorflow as tf
 
 
+def _collective_communication(all_reduce_alg):
+  """Return a CollectiveCommunication based on all_reduce_alg.
+
+  Args:
+    all_reduce_alg: a string specifying which collective communication to pick,
+      or None.
+
+  Returns:
+    tf.distribute.experimental.CollectiveCommunication object
+
+  Raises:
+    ValueError: if `all_reduce_alg` not in [None, 'ring', 'nccl']
+  """
+  collective_communication_options = {
+      None: tf.distribute.experimental.CollectiveCommunication.AUTO,
+      "ring": tf.distribute.experimental.CollectiveCommunication.RING,
+      "nccl": tf.distribute.experimental.CollectiveCommunication.NCCL
+  }
+  if all_reduce_alg not in collective_communication_options:
+    raise ValueError(
+        "When used with `multi_worker_mirrored`, valid values for "
+        "all_reduce_alg are ['ring', 'nccl'].  Supplied value: {}".format(
+            all_reduce_alg))
+  return collective_communication_options[all_reduce_alg]
+
+
+def _mirrored_cross_device_ops(all_reduce_alg, num_packs):
+  """Return a CrossDeviceOps based on all_reduce_alg and num_packs.
+
+  Args:
+    all_reduce_alg: a string specifying which cross device op to pick, or None.
+    num_packs: an integer specifying number of packs for the cross device op.
+
+  Returns:
+    tf.distribute.CrossDeviceOps object or None.
+
+  Raises:
+    ValueError: if `all_reduce_alg` not in [None, 'nccl', 'hierarchical_copy'].
+  """
+  if all_reduce_alg is None:
+    return None
+  mirrored_all_reduce_options = {
+      "nccl": tf.distribute.NcclAllReduce,
+      "hierarchical_copy": tf.distribute.HierarchicalCopyAllReduce
+  }
+  if all_reduce_alg not in mirrored_all_reduce_options:
+    raise ValueError(
+        "When used with `mirrored`, valid values for all_reduce_alg are "
+        "['nccl', 'hierarchical_copy'].  Supplied value: {}".format(
+            all_reduce_alg))
+  cross_device_ops_class = mirrored_all_reduce_options[all_reduce_alg]
+  return cross_device_ops_class(num_packs=num_packs)
+
+
 def get_distribution_strategy(distribution_strategy="default",
                               num_gpus=0,
-                              all_reduce_alg=None):
+                              num_workers=1,
+                              all_reduce_alg=None,
+                              num_packs=1):
   """Return a DistributionStrategy for running the model.
 
   Args:
-    distribution_strategy: a string specify which distribution strategy to use.
-      Accepted values are 'off', 'default', 'one_device', 'mirrored',
-      'parameter_server', 'collective', case insensitive. 'off' means not to use
-      Distribution Strategy; 'default' means to choose from `MirroredStrategy`
-      or `OneDeviceStrategy` according to the number of GPUs."
+    distribution_strategy: a string specifying which distribution strategy to
+      use. Accepted values are 'off', 'default', 'one_device', 'mirrored',
+      'parameter_server', 'multi_worker_mirrored', case insensitive. 'off' means
+      not to use Distribution Strategy; 'default' means to choose from
+      `MirroredStrategy`, `MultiWorkerMirroredStrategy`, or `OneDeviceStrategy`
+      according to the number of GPUs and number of workers.
     num_gpus: Number of GPUs to run this model.
-    all_reduce_alg: Optional. Specify which algorithm to use when performing
-      all-reduce. See tf.contrib.distribute.AllReduceCrossDeviceOps for
-      available algorithms. If None, DistributionStrategy will choose based on
+    num_workers: Number of workers to run this model.
+    all_reduce_alg: Optional. Specifies which algorithm to use when performing
+      all-reduce. For `MirroredStrategy`, valid values are "nccl" and
+      "hierarchical_copy". For `MultiWorkerMirroredStrategy`, valid values are
+      "ring" and "nccl".  If None, DistributionStrategy will choose based on
       device topology.
+    num_packs: Optional.  Sets the `num_packs` in `tf.distribute.NcclAllReduce`
+      or `tf.distribute.HierarchicalCopyAllReduce` for `MirroredStrategy`.
 
   Returns:
     tf.distribute.DistibutionStrategy object.
@@ -51,10 +114,15 @@ def get_distribution_strategy(distribution_strategy="default",
 
   distribution_strategy = distribution_strategy.lower()
   if distribution_strategy == "off":
-    if num_gpus > 1:
-      raise ValueError("When {} GPUs are specified, distribution_strategy flag "
-                       "cannot be set to 'off'.".format(num_gpus))
+    if num_gpus > 1 or num_workers > 1:
+      raise ValueError(
+          "When {} GPUs and  {} workers are specified, distribution_strategy "
+          "flag cannot be set to 'off'.".format(num_gpus, num_workers))
     return None
+
+  if distribution_strategy == "multi_worker_mirrored" or num_workers > 1:
+    return tf.distribute.experimental.MultiWorkerMirroredStrategy(
+        communication=_collective_communication(all_reduce_alg))
 
   if (distribution_strategy == "one_device" or
       (distribution_strategy == "default" and num_gpus <= 1)):
@@ -72,27 +140,18 @@ def get_distribution_strategy(distribution_strategy="default",
       devices = ["device:CPU:0"]
     else:
       devices = ["device:GPU:%d" % i for i in range(num_gpus)]
-    if all_reduce_alg:
-      return tf.distribute.MirroredStrategy(
-          devices=devices,
-          cross_device_ops=tf.contrib.distribute.AllReduceCrossDeviceOps(
-              all_reduce_alg, num_packs=2))
-    else:
-      return tf.distribute.MirroredStrategy(devices=devices)
-
-  if distribution_strategy == "collective":
-    return tf.contrib.distribute.CollectiveAllReduceStrategy(
-        num_gpus_per_worker=num_gpus)
+    return tf.distribute.MirroredStrategy(
+        devices=devices,
+        cross_device_ops=_mirrored_cross_device_ops(all_reduce_alg, num_packs))
 
   if distribution_strategy == "parameter_server":
-    return tf.contrib.distribute.ParameterServerStrategy(
-        num_gpus_per_worker=num_gpus)
+    return tf.distribute.experimental.ParameterServerStrategy()
 
   raise ValueError(
       "Unrecognized Distribution Strategy: %r" % distribution_strategy)
 
 
-def per_device_batch_size(batch_size, num_gpus):
+def per_replica_batch_size(batch_size, num_gpus):
   """For multi-gpu, batch-size must be a multiple of the number of GPUs.
 
 
@@ -180,6 +239,7 @@ def _undo_monkey_patch_dataset_method(strategy):
 
 
 def set_up_synthetic_data():
+  _monkey_patch_dataset_method(tf.distribute.OneDeviceStrategy)
   _monkey_patch_dataset_method(tf.distribute.MirroredStrategy)
   # TODO(tobyboyd): Remove when contrib.distribute is all in core.
   if hasattr(tf, 'contrib'):
@@ -190,6 +250,7 @@ def set_up_synthetic_data():
 
 
 def undo_set_up_synthetic_data():
+  _undo_monkey_patch_dataset_method(tf.distribute.OneDeviceStrategy)
   _undo_monkey_patch_dataset_method(tf.distribute.MirroredStrategy)
   # TODO(tobyboyd): Remove when contrib.distribute is all in core.
   if hasattr(tf, 'contrib'):
@@ -197,3 +258,51 @@ def undo_set_up_synthetic_data():
     _undo_monkey_patch_dataset_method(tf.contrib.distribute.OneDeviceStrategy)
   else:
     print('Contrib missing: Skip remove monkey patch tf.contrib.distribute.*')
+
+
+def configure_cluster(worker_hosts=None, task_index=-1):
+  """Set multi-worker cluster spec in TF_CONFIG environment variable.
+
+  Args:
+    worker_hosts: comma-separated list of worker ip:port pairs.
+
+  Returns:
+    Number of workers in the cluster.
+  """
+  tf_config = json.loads(os.environ.get('TF_CONFIG', '{}'))
+  if tf_config:
+    num_workers = (len(tf_config['cluster'].get('chief', [])) +
+                   len(tf_config['cluster'].get('worker', [])))
+  elif worker_hosts:
+    workers = worker_hosts.split(',')
+    num_workers = len(workers)
+    if num_workers > 1 and task_index < 0:
+      raise ValueError('Must specify task_index when number of workers > 1')
+    task_index = 0 if num_workers == 1 else task_index
+    os.environ['TF_CONFIG'] = json.dumps({
+        'cluster': {
+            'worker': workers
+        },
+        'task': {'type': 'worker', 'index': task_index}
+    })
+  else:
+    num_workers = 1
+  return num_workers
+
+
+def get_strategy_scope(strategy):
+  if strategy:
+    strategy_scope = strategy.scope()
+  else:
+    strategy_scope = DummyContextManager()
+
+  return strategy_scope
+
+
+class DummyContextManager(object):
+
+  def __enter__(self):
+    pass
+
+  def __exit__(self, *args):
+    pass
