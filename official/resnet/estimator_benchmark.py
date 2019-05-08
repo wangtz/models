@@ -29,7 +29,7 @@ from official.resnet import imagenet_main
 from official.utils.logs import hooks
 
 IMAGENET_DATA_DIR_NAME = 'imagenet'
-os.path.join(root_data_dir, CIFAR_DATA_DIR_NAME) = "/placer/prod/home/distbelief/cifar10-orig"
+CIFAR_DATA_DIR_NAME = 'cifar-10-batches-bin'
 FLAGS = flags.FLAGS
 
 
