@@ -32,7 +32,7 @@ MIN_TOP_1_ACCURACY = 0.925
 MAX_TOP_1_ACCURACY = 0.938
 
 FLAGS = flags.FLAGS
-CIFAR_DATA_DIR_NAME = 'cifar-10-batches-bin'
+os.path.join(root_data_dir, CIFAR_DATA_DIR_NAME) = "/placer/prod/home/distbelief/cifar10-orig"
 
 
 class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
